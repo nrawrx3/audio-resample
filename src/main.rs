@@ -1,6 +1,3 @@
-use core::slice;
-use std::{f32::consts::PI, time::Duration};
-
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use device_config::get_wanted_device_config;
 use log::info;
@@ -22,25 +19,23 @@ fn start_cpal_playback_thread(
     let sample_rate = 48000;
     let channels = 2;
     let buffer_size_ms = 10;
-    let buffer_size_samples = (sample_rate / 1000) * buffer_size_ms;
+    let buffer_size_in_samples = (sample_rate / 1000) * buffer_size_ms;
 
     let config = get_wanted_device_config(
         supported_configs,
         sample_rate,
         channels,
-        buffer_size_samples,
+        buffer_size_in_samples,
     )
     .expect("no config found that matches the wanted parameters");
 
     info!("Using config: {:?}", config);
     info!("Playing on device: {}", device.name().unwrap());
-
     std::thread::spawn(move || {
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    print!(".");
                     let mut i = 0;
                     while i < data.len() {
                         data[i] = 1.0;
@@ -58,11 +53,11 @@ fn start_cpal_playback_thread(
             eprintln!("an error occurred while starting the stream: {}", err);
         }
 
-        // if stop_playback_thread.recv().is_ok() {
-        //     info!("stopping playback thread");
-        // }
+        if stop_playback_thread.recv().is_ok() {
+            info!("stopping playback thread");
+        }
 
-        std::thread::park();
+        // std::thread::park();
     })
 }
 
@@ -71,6 +66,18 @@ fn main() {
 
     let (stop_cpal_tx, stop_cpal_rx) = std::sync::mpsc::channel();
 
-    let t = start_cpal_playback_thread(stop_cpal_rx);
-    t.join().expect("error while joining thread");
+    let cpal_thread = start_cpal_playback_thread(stop_cpal_rx);
+
+    let mut reader = hound::WavReader::open("audio/stereo_sine_48kHz.wav")
+        .expect("error while opening wav file");
+
+    let wav_spec = reader.spec();
+
+    info!("Wav spec: {:?}", wav_spec);
+
+    let wav_samples = reader
+        .samples::<i16>()
+        .map(|s| s.unwrap() as f32 / i16::MAX as f32);
+
+    cpal_thread.join().expect("error while joining thread");
 }
