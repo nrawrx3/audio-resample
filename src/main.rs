@@ -1,5 +1,6 @@
 use std::fmt;
 
+use clap::{arg, command, Arg, Command};
 use constants::{OUTPUT_DEVICE_BUFFER_SIZE_MS, OUTPUT_DEVICE_CHANNELS, OUTPUT_DEVICE_SAMPLE_RATE};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use device_config::get_wanted_device_config;
@@ -65,15 +66,8 @@ fn write_frames_to_wav(
     }
 }
 
-fn main() {
-    env_logger::init();
-
-    // let (stop_cpal_tx, stop_cpal_rx) = std::sync::mpsc::channel();
-
-    // let cpal_thread = cpal_thread::start_cpal_playback_thread(stop_cpal_rx);
-
-    let mut reader = hound::WavReader::open("audio/stereo-lvb-sym-5-1.wav")
-        .expect("error while opening wav file");
+fn wav_file_resampler_app(file_path: &str) {
+    let mut reader = hound::WavReader::open(file_path).expect("error while opening wav file");
 
     let wav_spec = reader.spec();
 
@@ -209,6 +203,38 @@ fn main() {
         resampler_delay,
         OUTPUT_DEVICE_SAMPLE_RATE,
     );
+}
+
+fn main() {
+    env_logger::init();
+
+    // let (stop_cpal_tx, stop_cpal_rx) = std::sync::mpsc::channel();
+
+    // let cpal_thread = cpal_thread::start_cpal_playback_thread(stop_cpal_rx);
 
     // cpal_thread.join().expect("error while joining thread");
+
+    let cmd= Command::new("audio-resampler")
+        .about("Resample audio file or stream")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .allow_external_subcommands(true)
+        .subcommand(
+            Command::new("file")
+            .about("Resample audio file")
+            .arg(arg!(<FILE> "Path to the audio file to resample"))
+            .arg_required_else_help(true)
+        );
+
+    let matches = cmd.get_matches();
+
+    match matches.subcommand() {
+        Some(("file", file_matches)) => {
+            let file_path = file_matches.get_one::<String>("FILE").unwrap();
+            wav_file_resampler_app(file_path);
+        }
+        _ => {
+            panic!("Unknown subcommand");
+        }
+    }
 }
