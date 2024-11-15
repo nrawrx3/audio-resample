@@ -1,8 +1,8 @@
-use cpal::{SampleRate, SupportedOutputConfigs};
+use cpal::{SampleRate, SupportedInputConfigs, SupportedOutputConfigs, SupportedStreamConfig, SupportedStreamConfigRange};
 use log::info;
 
-pub fn get_wanted_device_config(
-    output_configs: SupportedOutputConfigs,
+pub fn find_suitable_stream_config(
+    stream_configs: &mut dyn Iterator<Item = SupportedStreamConfigRange>,
     sample_rate: u32,
     channels: u32,
     buffer_size_in_samples: u32,
@@ -11,7 +11,7 @@ pub fn get_wanted_device_config(
 
     let buffer_size_in_bytes = buffer_size_in_samples * channels * (size_of::<f32>() as u32);
 
-    for config in output_configs {
+    for config in stream_configs {
         info!("Supported output config: {:?}", config);
 
         if must_have_config.is_some() {
@@ -20,6 +20,7 @@ pub fn get_wanted_device_config(
 
         let sr_min = config.min_sample_rate();
         let sr_max = config.max_sample_rate();
+
 
         let sr_buffer_size = match config.buffer_size().clone() {
             cpal::SupportedBufferSize::Range { min, max } => {

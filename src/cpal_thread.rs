@@ -1,11 +1,14 @@
+use std::path::Iter;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use log::info;
+use log::{error, info};
+use ringbuf::traits::Producer;
 
 use crate::{
     constants::{
-        OUTPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES, OUTPUT_DEVICE_CHANNELS, OUTPUT_DEVICE_SAMPLE_RATE,
+        INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES, INPUT_DEVICE_CHANNELS, INPUT_DEVICE_SAMPLE_RATE, OUTPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES, OUTPUT_DEVICE_CHANNELS, OUTPUT_DEVICE_SAMPLE_RATE
     },
-    device_config::get_wanted_device_config,
+    device_config::find_suitable_stream_config,
 };
 
 pub fn start_cpal_playback_thread(
@@ -16,12 +19,12 @@ pub fn start_cpal_playback_thread(
         .default_output_device()
         .expect("no output device available");
 
-    let supported_configs = device
+    let mut supported_configs = device
         .supported_output_configs()
         .expect("error while querying configs");
 
-    let config = get_wanted_device_config(
-        supported_configs,
+    let config = find_suitable_stream_config(
+        &mut supported_configs as &mut dyn Iterator<Item = _>,
         OUTPUT_DEVICE_SAMPLE_RATE,
         OUTPUT_DEVICE_CHANNELS,
         OUTPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES,
@@ -57,5 +60,42 @@ pub fn start_cpal_playback_thread(
         }
 
         // std::thread::park();
+    })
+}
+
+pub fn start_cpal_capture_thread<T: Producer<Item = f32> + Send + 'static>(
+    stop_capture_thread: std::sync::mpsc::Receiver<()>,
+    mut pcm_producer: T,
+) -> std::thread::JoinHandle<()> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .expect("no input device available");
+
+    info!("Capturing on device: {}", device.name().unwrap());
+
+    let mut supported_configs = device
+        .supported_input_configs()
+        .expect("error while querying configs");
+
+    let config = find_suitable_stream_config(
+        &mut supported_configs as &mut dyn Iterator<Item = _>,
+        INPUT_DEVICE_SAMPLE_RATE,
+        INPUT_DEVICE_CHANNELS,
+        INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES,
+    ).expect("no config found that matches the wanted parameters");
+
+    std::thread::spawn(move ||  {
+        let stream = device
+        .build_input_stream(&config, move |data: &[f32], _| {
+            // Push all the samples into the ringbuffer.
+            for &pcm in data {
+                if pcm_producer.try_push(pcm).is_err() {
+                    error!("ringbuffer is full, dropping samples");
+                }
+            }
+        }, move |err| {
+            error!("an error occurred on stream: {}", err);
+        }, None);
     })
 }
