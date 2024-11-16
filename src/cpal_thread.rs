@@ -86,16 +86,28 @@ pub fn start_cpal_capture_thread<T: Producer<Item = f32> + Send + 'static>(
     ).expect("no config found that matches the wanted parameters");
 
     std::thread::spawn(move ||  {
+        let mut ringbuf_was_full = false;
         let stream = device
         .build_input_stream(&config, move |data: &[f32], _| {
             // Push all the samples into the ringbuffer.
             for &pcm in data {
+                // if ringbuf_was_full {
+                //     return;
+                // }
                 if pcm_producer.try_push(pcm).is_err() {
                     error!("ringbuffer is full, dropping samples");
+                    ringbuf_was_full = true;
                 }
             }
         }, move |err| {
             error!("an error occurred on stream: {}", err);
-        }, None);
+        }, None).expect("error while building input stream");
+
+        stream.play().expect("error while starting the stream");
+
+        if stop_capture_thread.recv().is_ok() {
+            info!("stopping capture thread");
+            drop(stream);
+        }
     })
 }
