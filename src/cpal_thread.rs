@@ -63,8 +63,11 @@ pub fn start_cpal_playback_thread(
     })
 }
 
+
 pub fn start_cpal_capture_thread<T: Producer<Item = f32> + Send + 'static>(
     stop_capture_thread: std::sync::mpsc::Receiver<()>,
+    signal_ringbuf_has_data: std::sync::mpsc::Sender<()>,
+    signal_ringbuf_min_pcms: usize,
     mut pcm_producer: T,
 ) -> std::thread::JoinHandle<()> {
     let host = cpal::default_host();
@@ -97,6 +100,13 @@ pub fn start_cpal_capture_thread<T: Producer<Item = f32> + Send + 'static>(
                 if pcm_producer.try_push(pcm).is_err() {
                     error!("ringbuffer is full, dropping samples");
                     ringbuf_was_full = true;
+                }
+            }
+
+            // Check the ringbuf length and notify the main thread if it's long enough.
+            if pcm_producer.occupied_len() >= signal_ringbuf_min_pcms {
+                if signal_ringbuf_has_data.send(()).is_err() {
+                    error!("error while notifying main thread");
                 }
             }
         }, move |err| {

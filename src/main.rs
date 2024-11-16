@@ -14,7 +14,7 @@ use constants::{
 use cpal::InputStreamTimestamp;
 use cpal_thread::start_cpal_capture_thread;
 use fixedvec::{alloc_stack, FixedVec};
-use log::{info, warn};
+use log::{debug, info, warn};
 use ringbuf::{
     traits::{Consumer, Split},
     HeapRb,
@@ -50,6 +50,17 @@ fn write_frames_to_wav(
     n_frames_to_delay: usize,
     sample_rate: u32,
 ) {
+    let num_samples = channel_buffers[0].len();
+    for i in 1..channel_buffers.len() {
+        assert_eq!(num_samples, channel_buffers[i].len());
+    }
+
+    info!(
+        "Writing {} samples per {} channel(s) to wav file",
+        num_samples,
+        channel_buffers.len()
+    );
+
     let mut writer = hound::WavWriter::create(
         filename,
         hound::WavSpec {
@@ -216,12 +227,12 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
     // We wait for 10 chunks of raw audio into the ringbuf and process them in a loop.
     // TODO: Just make the resample chunk size same as the ring buffer size. We can avoid the extra resampling loop.
     let resample_chunk_size_in_samples = INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES;
-    let n_chunks_per_resample_loop = 10;
+    let ringbuf_read_size_in_chunks = 10;
 
-    let ringbuf_read_size_in_samples = resample_chunk_size_in_samples * n_chunks_per_resample_loop;
+    let ringbuf_read_size_in_samples = resample_chunk_size_in_samples * ringbuf_read_size_in_chunks;
+    let ringbuf_read_size_in_pcms = ringbuf_read_size_in_samples * INPUT_DEVICE_CHANNELS;
 
     let ringbuf_size_in_samples = ringbuf_read_size_in_samples * 10;
-
     let ringbuf_size_in_pcms = ringbuf_size_in_samples * INPUT_DEVICE_CHANNELS;
 
     let resample_polling_interval = Duration::from_millis(100); // Keep this a multiple of device buffer size in ms.
@@ -234,40 +245,52 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
 
     // Before we start the audio capture thread, set up the resampler first.
 
+    // let new_sample_rate = OUTPUT_DEVICE_SAMPLE_RATE;
+    let new_sample_rate = 16000 as usize;
+
     let mut resampler = FftFixedInOut::<f32>::new(
         INPUT_DEVICE_SAMPLE_RATE,
-        OUTPUT_DEVICE_SAMPLE_RATE,
+        new_sample_rate,
         resample_chunk_size_in_samples,
-        2,
+        INPUT_DEVICE_CHANNELS,
     )
     .expect("error while creating resampler");
 
-    let cpal_thread_handle = start_cpal_capture_thread(stop_capture_rx, pcm_producer);
+    info!("Resampler delay: {}", resampler.output_delay());
+    info!("Original sample rate: {}", INPUT_DEVICE_SAMPLE_RATE);
+    info!("New sample rate: {}", new_sample_rate);
+
+    let resampler_delay = resampler.output_delay();
+
+    let signal_ringbuf_has_data = std::sync::mpsc::channel::<()>();
+
+    let cpal_thread_handle = start_cpal_capture_thread(
+        stop_capture_rx,
+        signal_ringbuf_has_data.0,
+        ringbuf_read_size_in_pcms,
+        pcm_producer,
+    );
 
     // Use this thread itself as the consumer thread.
 
     let capture_duration = Duration::from_secs(10);
     let n_captured_frames = INPUT_DEVICE_SAMPLE_RATE * capture_duration.as_secs() as usize;
 
-    let mut all_output_frames = vec![
-        Vec::<f32>::with_capacity(n_captured_frames as usize);
-        OUTPUT_DEVICE_CHANNELS as usize
-    ];
+    // TODO: Do channel mixing. For now use INPUT_DEVICE_CHANNELS as the number of output channels.
+    let mut all_output_frames =
+        vec![Vec::<f32>::with_capacity(n_captured_frames); INPUT_DEVICE_CHANNELS];
 
     // ==> Per loop data structures.
 
     // The interleaved frames. We always keep it sized to the ringbuf read size in pcms.
-    let mut consumed_pcm_chunks =
-        vec![0.0f32; (ringbuf_read_size_in_samples * INPUT_DEVICE_CHANNELS) as usize];
+    let mut consumed_pcm_chunks = vec![0.0f32; ringbuf_read_size_in_pcms];
 
     // The non-interleaved frames chunks.
-    let mut consumed_frame_chunks = vec![
-        Vec::<f32>::with_capacity(ringbuf_read_size_in_samples as usize);
-        INPUT_DEVICE_CHANNELS as usize
-    ];
+    let mut consumed_frame_chunks =
+        vec![Vec::<f32>::with_capacity(ringbuf_read_size_in_samples); INPUT_DEVICE_CHANNELS];
 
     let mut output_frame_slices =
-        vec![vec![0.0f32; resampler.output_frames_max()]; OUTPUT_DEVICE_CHANNELS as usize];
+        vec![vec![0.0f32; resampler.output_frames_max()]; INPUT_DEVICE_CHANNELS];
 
     // <== Per loop data structures.
 
@@ -287,7 +310,9 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
     let mut n_leftover_samples = 0;
 
     loop {
-        std::thread::sleep(resample_polling_interval);
+        // std::thread::sleep(resample_polling_interval);
+
+        let _ = signal_ringbuf_has_data.1.recv();
 
         // Consume the next resample chunks. Do not overwrite the leftover chunks.
         let n_consumed_pcms = pcm_consumer.pop_slice(
@@ -295,7 +320,7 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
                 .as_mut(),
         );
 
-        info!("n_consumed_pcms: {}", n_consumed_pcms);
+        debug!("n_consumed_pcms: {}", n_consumed_pcms);
 
         let wake_up_time = std::time::Instant::now();
 
@@ -313,7 +338,7 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
         let n_samples_to_resample = n_full_chunks * resample_chunk_size_in_samples;
 
         let delta_time = wake_up_time - start_time;
-        if delta_time.as_secs() >= 10 {
+        if delta_time.as_secs() >= 5 {
             info!("Stopping capture");
             break;
         }
@@ -342,6 +367,7 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
 
         // Resample each chunk.
         for chunk_index in 0..n_full_chunks {
+            debug!("   chunk_index: {}", chunk_index);
             // Make the input slices point to the current chunk.
             let chunk_start_index = chunk_index * resample_chunk_size_in_samples;
             let chunk_end_index = (chunk_index + 1) * resample_chunk_size_in_samples;
@@ -356,8 +382,11 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
 
             let mut input_frames_next_count = resampler.input_frames_next();
 
+            // info!("cur input frame len: {}", cur_input_frame[0].len());
+            // info!("input_frames_next_count: {}", input_frames_next_count);
+
             // This is same as the resample loop in the wav file resampler app.
-            while cur_input_frame[0].len() > input_frames_next_count {
+            while cur_input_frame[0].len() >= input_frames_next_count {
                 let (n_in_samples, n_out_samples) = resampler
                     .process_into_buffer(
                         &cur_input_frame.as_slice(),
@@ -365,6 +394,8 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
                         None,
                     )
                     .unwrap();
+
+                debug!("nin: {}, nout: {}", n_in_samples, n_out_samples);
 
                 // Trim the input slices.
                 for chan in cur_input_frame.iter_mut() {
@@ -394,8 +425,19 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
             warn!("Too many leftover samples: {}", n_leftover_samples);
         }
 
-        info!("n_leftover_samples: {}", n_leftover_samples);
+        debug!("n_leftover_samples: {}", n_leftover_samples);
     }
+
+    // Write the resampled frames to a wav file.
+
+    let filename = fmt::format(format_args!("audio/captured_{}_kHz.wav", new_sample_rate));
+
+    write_frames_to_wav(
+        &all_output_frames,
+        &filename,
+        resampler_delay,
+        new_sample_rate as u32,
+    );
 }
 
 fn main() {

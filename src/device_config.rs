@@ -21,6 +21,10 @@ pub fn find_suitable_stream_config(
             continue;
         }
 
+        if channels != config.channels() as usize {
+            continue;
+        }
+
         let sr_min = config.min_sample_rate();
         let sr_max = config.max_sample_rate();
 
