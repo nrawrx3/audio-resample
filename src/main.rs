@@ -219,10 +219,14 @@ fn wav_file_resampler_app(file_path: &str) {
 }
 
 // Throughout this the data structures are either named pcm samples or frames.
-// The samples refer to the interleaved samples and frames refer to the
-// non-interleaved samples. So a variable named xxx_frame_xxx is usually a Vec
-// of Vec<f32> or Vec of f32 slices. A variable named xxx_pcm_xxx is usually a
-// Vec<f32> or f32 slice.
+// 1. The samples refer to the interleaved samples and frames refer to the
+//    non-interleaved samples. So a variable named xxx_frame_xxx is usually a
+//    Vec of Vec<f32> or Vec of f32 slices. A variable named xxx_pcm_xxx is
+//    usually a Vec<f32> or f32 slice.
+//
+// 2. A chunk refers to a contiguous block of samples and the size of the chunk
+//    is the number of samples (not pcms). A chunk refers to a single act of
+//    resampling.
 fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
     // new_sample_rate needs to be a multiple of 4000.
     assert_eq!(
@@ -231,18 +235,14 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
         "New sample rate must be a multiple of 4000"
     );
 
-    // We wait for 10 chunks of raw audio into the ringbuf and process them in a loop.
-    // TODO: Just make the resample chunk size same as the ring buffer size. We can avoid the extra resampling loop.
-    let resample_chunk_size_in_samples = INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES;
-    let ringbuf_read_size_in_chunks = 10;
-
-    let ringbuf_read_size_in_samples = resample_chunk_size_in_samples * ringbuf_read_size_in_chunks;
+    // We wait for 10 chunks of raw audio into the ringbuf and resample them.
+    let resample_chunk_size_in_samples = INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES * 10;
+    let ringbuf_read_size_in_samples = resample_chunk_size_in_samples;
     let ringbuf_read_size_in_pcms = ringbuf_read_size_in_samples * INPUT_DEVICE_CHANNELS;
 
-    let ringbuf_size_in_samples = ringbuf_read_size_in_samples * 10;
+    let ringbuf_size_in_chunks = 10;
+    let ringbuf_size_in_samples = ringbuf_read_size_in_samples * ringbuf_size_in_chunks;
     let ringbuf_size_in_pcms = ringbuf_size_in_samples * INPUT_DEVICE_CHANNELS;
-
-    let resample_polling_interval = Duration::from_millis(100); // Keep this a multiple of device buffer size in ms.
 
     let pcm_ringbuf = HeapRb::<f32>::new(ringbuf_size_in_pcms);
 
@@ -371,47 +371,39 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
         let mut cur_input_frame_chunk_mem = alloc_stack!([&[f32]; INPUT_DEVICE_CHANNELS]);
         let mut cur_input_frame = FixedVec::new(&mut cur_input_frame_chunk_mem);
 
-        // Resample each chunk.
-        for chunk_index in 0..n_full_chunks {
-            debug!("   chunk_index: {}", chunk_index);
-            // Make the input slices point to the current chunk.
-            let chunk_start_index = chunk_index * resample_chunk_size_in_samples;
-            let chunk_end_index = (chunk_index + 1) * resample_chunk_size_in_samples;
+        // Resample the chunk.
 
-            cur_input_frame.clear();
+        // Make the input slices point to the head of the chunk.
 
-            for channel in 0..INPUT_DEVICE_CHANNELS {
-                cur_input_frame
-                    .push(&consumed_frame_chunks[channel][chunk_start_index..chunk_end_index])
-                    .expect("error while pushing to fixed vec");
+        cur_input_frame.clear();
+
+        for channel in 0..INPUT_DEVICE_CHANNELS {
+            cur_input_frame
+                .push(&consumed_frame_chunks[channel][..])
+                .expect("error while pushing to fixed vec");
+        }
+
+        let mut input_frames_next_count = resampler.input_frames_next();
+
+        // info!("cur input frame len: {}", cur_input_frame[0].len());
+        // info!("input_frames_next_count: {}", input_frames_next_count);
+
+        // This is same as the resample loop in the wav file resampler app.
+        while cur_input_frame[0].len() >= input_frames_next_count {
+            let (n_in_samples, n_out_samples) = resampler
+                .process_into_buffer(&cur_input_frame.as_slice(), &mut output_frame_slices, None)
+                .unwrap();
+
+            debug!("nin: {}, nout: {}", n_in_samples, n_out_samples);
+
+            // Trim the input slices.
+            for chan in cur_input_frame.iter_mut() {
+                *chan = &chan[n_in_samples..];
             }
 
-            let mut input_frames_next_count = resampler.input_frames_next();
+            append_frames(&mut all_output_frames, &output_frame_slices, n_out_samples);
 
-            // info!("cur input frame len: {}", cur_input_frame[0].len());
-            // info!("input_frames_next_count: {}", input_frames_next_count);
-
-            // This is same as the resample loop in the wav file resampler app.
-            while cur_input_frame[0].len() >= input_frames_next_count {
-                let (n_in_samples, n_out_samples) = resampler
-                    .process_into_buffer(
-                        &cur_input_frame.as_slice(),
-                        &mut output_frame_slices,
-                        None,
-                    )
-                    .unwrap();
-
-                debug!("nin: {}, nout: {}", n_in_samples, n_out_samples);
-
-                // Trim the input slices.
-                for chan in cur_input_frame.iter_mut() {
-                    *chan = &chan[n_in_samples..];
-                }
-
-                append_frames(&mut all_output_frames, &output_frame_slices, n_out_samples);
-
-                input_frames_next_count = resampler.input_frames_next();
-            }
+            input_frames_next_count = resampler.input_frames_next();
         }
 
         // Move the partial chunk to the front of the consumed chunks vector.
