@@ -2,3 +2,4 @@
 dev.env
 .DS_Store
 audio/resampled_*
+audio/captured_*

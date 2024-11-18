@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use clap::{arg, Command};
+use clap::{arg, value_parser, Command};
 use constants::{
     INPUT_DEVICE_BUFFER_SIZE_IN_PCM_SAMPLES, INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES,
     INPUT_DEVICE_CHANNELS, INPUT_DEVICE_SAMPLE_RATE, OUTPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES,
@@ -223,7 +223,14 @@ fn wav_file_resampler_app(file_path: &str) {
 // non-interleaved samples. So a variable named xxx_frame_xxx is usually a Vec
 // of Vec<f32> or Vec of f32 slices. A variable named xxx_pcm_xxx is usually a
 // Vec<f32> or f32 slice.
-fn capture_audio_to_wav_file_app(dst_file_path: &str) {
+fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
+    // new_sample_rate needs to be a multiple of 4000.
+    assert_eq!(
+        new_sample_rate % 4000,
+        0,
+        "New sample rate must be a multiple of 4000"
+    );
+
     // We wait for 10 chunks of raw audio into the ringbuf and process them in a loop.
     // TODO: Just make the resample chunk size same as the ring buffer size. We can avoid the extra resampling loop.
     let resample_chunk_size_in_samples = INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES;
@@ -246,7 +253,6 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str) {
     // Before we start the audio capture thread, set up the resampler first.
 
     // let new_sample_rate = OUTPUT_DEVICE_SAMPLE_RATE;
-    let new_sample_rate = 16000 as usize;
 
     let mut resampler = FftFixedInOut::<f32>::new(
         INPUT_DEVICE_SAMPLE_RATE,
@@ -457,13 +463,20 @@ fn main() {
         .subcommand(
             Command::new("file")
                 .about("Resample audio file")
-                .arg(arg!(<FILE> "Path to the audio file to resample"))
+                .arg(
+                    arg!(<FILE> "Path to the audio file to resample")
+                        .value_parser(value_parser!(usize)),
+                )
                 .arg_required_else_help(true),
         )
         .subcommand(
             Command::new("capture")
                 .about("Capture audio to wav file")
                 .arg(arg!(<FILE> "Path to the wav file to write to"))
+                .arg(
+                    arg!(-s --samplerate <SAMPLE_RATE> "Output sample rate")
+                        .value_parser(value_parser!(usize)),
+                )
                 .arg_required_else_help(true),
         );
 
@@ -476,7 +489,10 @@ fn main() {
         }
         Some(("capture", capture_matches)) => {
             let file_path = capture_matches.get_one::<String>("FILE").unwrap();
-            capture_audio_to_wav_file_app(file_path);
+            let new_sample_rate: usize = *capture_matches
+                .get_one("samplerate")
+                .expect("error getting samplerate argument");
+            capture_audio_to_wav_file_app(file_path, new_sample_rate);
         }
         _ => {
             panic!("Unknown subcommand");
