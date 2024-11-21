@@ -15,7 +15,7 @@ pub fn find_suitable_stream_config(
     let buffer_size_in_bytes = buffer_size_in_samples * channels * size_of::<f32>();
 
     for config in stream_configs {
-        info!("Supported output config: {:?}", config);
+        info!("Supported config for device {:?}", config);
 
         if must_have_config.is_some() {
             continue;
@@ -41,8 +41,8 @@ pub fn find_suitable_stream_config(
         };
 
         // Usually we will have 48k sample rate and 2 channels. Hardcoding it for that.
-        if sr_min == SampleRate(sample_rate as u32)
-            && sr_max == SampleRate(sample_rate as u32)
+        if sr_min <= SampleRate(sample_rate as u32)
+            && sr_max >= SampleRate(sample_rate as u32)
             && sr_buffer_size.is_some()
         {
             must_have_config = Some(cpal::StreamConfig {
