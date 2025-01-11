@@ -92,6 +92,7 @@ dependencies = [
  "fixedvec",
  "hound",
  "log",
+ "once_cell",
  "ringbuf",
  "rubato",
 ]

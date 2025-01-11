@@ -1,20 +1,29 @@
 use std::{
     alloc::{alloc_zeroed, Layout},
+    f32::MIN,
     fmt,
+    sync::RwLock,
     thread::current,
     time::Duration,
 };
 
 use clap::{arg, value_parser, Command};
 use constants::{
-    INPUT_DEVICE_BUFFER_SIZE_IN_PCM_SAMPLES, INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES,
-    INPUT_DEVICE_CHANNELS, INPUT_DEVICE_SAMPLE_RATE, OUTPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES,
-    OUTPUT_DEVICE_BUFFER_SIZE_MS, OUTPUT_DEVICE_CHANNELS, OUTPUT_DEVICE_SAMPLE_RATE,
+    // INPUT_DEVICE_BUFFER_SIZE_IN_PCM_SAMPLES, INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES,
+    // INPUT_DEVICE_CHANNELS,
+    // INPUT_DEVICE_SAMPLE_RATE,
+    EXACT_INPUT_DEVICE_CHANNELS,
+    MIN_INPUT_DEVICE_BUFFER_SIZE_MS,
+    OUTPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES,
+    OUTPUT_DEVICE_CHANNELS,
+    OUTPUT_DEVICE_SAMPLE_RATE,
 };
-use cpal::InputStreamTimestamp;
+use cpal::{traits::DeviceTrait, InputStreamTimestamp};
 use cpal_thread::start_cpal_capture_thread;
+use device_config::{select_audio_capture_device, select_suitable_stream_config};
 use fixedvec::{alloc_stack, FixedVec};
 use log::{debug, info, warn};
+use once_cell::sync::Lazy;
 use ringbuf::{
     traits::{Consumer, Split},
     HeapRb,
@@ -24,6 +33,16 @@ use rubato::{FftFixedInOut, Resampler};
 mod constants;
 mod cpal_thread;
 mod device_config;
+
+#[derive(Debug)]
+struct GlobalConfig {
+    input_device_channels: usize,
+    input_device_sample_rate: usize,
+    input_device_buffer_size_in_samples: usize,
+    drop_one_channel: bool,
+}
+
+static CHOSEN_STREAM_CONFIG: Lazy<RwLock<Option<GlobalConfig>>> = Lazy::new(|| RwLock::new(None));
 
 fn new_sample_count(
     original_sample_rate: u32,
@@ -235,14 +254,32 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
         "New sample rate must be a multiple of 4000"
     );
 
+    // Let user select the device first.
+
+    let cpal_device = select_audio_capture_device();
+
+    let mut supported_configs = cpal_device
+        .supported_input_configs()
+        .expect("error while querying supported configs");
+
+    let stream_config: cpal::StreamConfig =
+        select_suitable_stream_config(&mut supported_configs as &mut dyn Iterator<Item = _>).into();
+
+    info!("Selected stream config: {:?}", stream_config);
+
+    let input_sample_rate = stream_config.sample_rate.0 as usize;
+    let input_channels = stream_config.channels as usize;
+
+    let input_buffer_size_in_samples = MIN_INPUT_DEVICE_BUFFER_SIZE_MS * input_sample_rate / 1000;
+
     // We wait for 10 chunks of raw audio into the ringbuf and resample them.
-    let resample_chunk_size_in_samples = INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES * 10;
+    let resample_chunk_size_in_samples = input_buffer_size_in_samples * 10;
     let ringbuf_read_size_in_samples = resample_chunk_size_in_samples;
-    let ringbuf_read_size_in_pcms = ringbuf_read_size_in_samples * INPUT_DEVICE_CHANNELS;
+    let ringbuf_read_size_in_pcms = ringbuf_read_size_in_samples * (input_channels as usize);
 
     let ringbuf_size_in_chunks = 10;
     let ringbuf_size_in_samples = ringbuf_read_size_in_samples * ringbuf_size_in_chunks;
-    let ringbuf_size_in_pcms = ringbuf_size_in_samples * INPUT_DEVICE_CHANNELS;
+    let ringbuf_size_in_pcms = ringbuf_size_in_samples * (stream_config.channels as usize);
 
     let pcm_ringbuf = HeapRb::<f32>::new(ringbuf_size_in_pcms);
 
@@ -255,22 +292,25 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
     // let new_sample_rate = OUTPUT_DEVICE_SAMPLE_RATE;
 
     let mut resampler = FftFixedInOut::<f32>::new(
-        INPUT_DEVICE_SAMPLE_RATE,
+        stream_config.sample_rate.0 as usize,
         new_sample_rate,
         resample_chunk_size_in_samples,
-        INPUT_DEVICE_CHANNELS,
+        input_channels,
     )
     .expect("error while creating resampler");
 
+    info!("Input channels: {}", input_channels);
     info!("Resampler delay: {}", resampler.output_delay());
-    info!("Original sample rate: {}", INPUT_DEVICE_SAMPLE_RATE);
-    info!("New sample rate: {}", new_sample_rate);
+    info!("Input sample rate: {}", stream_config.sample_rate.0);
+    info!("Output sample rate: {}", new_sample_rate);
 
     let resampler_delay = resampler.output_delay();
 
     let signal_ringbuf_has_data = std::sync::mpsc::channel::<()>();
 
-    let cpal_thread_handle = start_cpal_capture_thread(
+    let _ = start_cpal_capture_thread(
+        cpal_device,
+        stream_config,
         stop_capture_rx,
         signal_ringbuf_has_data.0,
         ringbuf_read_size_in_pcms,
@@ -280,11 +320,11 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
     // Use this thread itself as the consumer thread.
 
     let capture_duration = Duration::from_secs(10);
-    let n_captured_frames = INPUT_DEVICE_SAMPLE_RATE * capture_duration.as_secs() as usize;
+    let n_captured_frames = input_sample_rate * capture_duration.as_secs() as usize;
 
-    // TODO: Do channel mixing. For now use INPUT_DEVICE_CHANNELS as the number of output channels.
+    // TODO: Do channel mixing if required. For now use input device channel itself.
     let mut all_output_frames =
-        vec![Vec::<f32>::with_capacity(n_captured_frames); INPUT_DEVICE_CHANNELS];
+        vec![Vec::<f32>::with_capacity(n_captured_frames); input_channels as usize];
 
     // ==> Per loop data structures.
 
@@ -293,10 +333,10 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
 
     // The non-interleaved frames chunks.
     let mut consumed_frame_chunks =
-        vec![Vec::<f32>::with_capacity(ringbuf_read_size_in_samples); INPUT_DEVICE_CHANNELS];
+        vec![Vec::<f32>::with_capacity(ringbuf_read_size_in_samples); input_channels];
 
     let mut output_frame_slices =
-        vec![vec![0.0f32; resampler.output_frames_max()]; INPUT_DEVICE_CHANNELS];
+        vec![vec![0.0f32; resampler.output_frames_max()]; input_channels as usize];
 
     // <== Per loop data structures.
 
@@ -322,8 +362,7 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
 
         // Consume the next resample chunks. Do not overwrite the leftover chunks.
         let n_consumed_pcms = pcm_consumer.pop_slice(
-            consumed_pcm_chunks.as_mut_slice()[(n_leftover_samples * INPUT_DEVICE_CHANNELS)..]
-                .as_mut(),
+            consumed_pcm_chunks.as_mut_slice()[(n_leftover_samples * input_channels)..].as_mut(),
         );
 
         debug!("n_consumed_pcms: {}", n_consumed_pcms);
@@ -334,7 +373,7 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
         consumed_pcm_chunks.resize(n_consumed_pcms as usize, 0.0);
 
         // We resample only full chunks.
-        let n_consumed_samples = n_consumed_pcms / INPUT_DEVICE_CHANNELS;
+        let n_consumed_samples = n_consumed_pcms / input_channels;
         let n_full_chunks = n_consumed_samples / resample_chunk_size_in_samples;
 
         // We will move the remaining samples to the front of the consumed chunks vector after we are done with the resampling.
@@ -344,7 +383,7 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
         let n_samples_to_resample = n_full_chunks * resample_chunk_size_in_samples;
 
         let delta_time = wake_up_time - start_time;
-        if delta_time.as_secs() >= 5 {
+        if delta_time.as_secs() >= 60 {
             info!("Stopping capture");
             break;
         }
@@ -358,17 +397,17 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
         });
 
         // Copy into the non-interleaved buffer.
-        for channel_number in 0..INPUT_DEVICE_CHANNELS {
+        for channel_number in 0..input_channels {
             consumed_frame_chunks[channel_number].clear();
 
             for i in 0..n_samples_to_resample {
-                let pc_index = i * INPUT_DEVICE_CHANNELS + channel_number;
+                let pc_index = i * input_channels + channel_number;
                 consumed_frame_chunks[channel_number].push(consumed_pcm_chunks[pc_index]);
             }
         }
 
         // A small vector to hold the per-channel slice refs. We allocate this on the stack.
-        let mut cur_input_frame_chunk_mem = alloc_stack!([&[f32]; INPUT_DEVICE_CHANNELS]);
+        let mut cur_input_frame_chunk_mem = alloc_stack!([&[f32]; EXACT_INPUT_DEVICE_CHANNELS]);
         let mut cur_input_frame = FixedVec::new(&mut cur_input_frame_chunk_mem);
 
         // Resample the chunk.
@@ -377,7 +416,7 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
 
         cur_input_frame.clear();
 
-        for channel in 0..INPUT_DEVICE_CHANNELS {
+        for channel in 0..input_channels {
             cur_input_frame
                 .push(&consumed_frame_chunks[channel][..])
                 .expect("error while pushing to fixed vec");
@@ -407,14 +446,14 @@ fn capture_audio_to_wav_file_app(dst_file_path: &str, new_sample_rate: usize) {
         }
 
         // Move the partial chunk to the front of the consumed chunks vector.
-        for i in 0..(n_leftover_samples * INPUT_DEVICE_CHANNELS) {
+        for i in 0..(n_leftover_samples * input_channels) {
             consumed_pcm_chunks[i as usize] =
-                consumed_pcm_chunks[(n_samples_to_resample * INPUT_DEVICE_CHANNELS + i) as usize];
+                consumed_pcm_chunks[(n_samples_to_resample * input_channels + i) as usize];
         }
 
         // Resize the consumed chunks vector to ringbuf size for the next iteration.
         consumed_pcm_chunks.resize(
-            (ringbuf_read_size_in_samples * INPUT_DEVICE_CHANNELS) as usize,
+            (ringbuf_read_size_in_samples * input_channels) as usize,
             0.0,
         );
 

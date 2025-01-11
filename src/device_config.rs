@@ -1,10 +1,14 @@
 use cpal::{
+    traits::{DeviceTrait, HostTrait},
     SampleRate, SupportedInputConfigs, SupportedOutputConfigs, SupportedStreamConfig,
     SupportedStreamConfigRange,
 };
 use log::info;
+use std::io::{self, Write};
 
-pub fn find_suitable_stream_config(
+use crate::constants;
+
+pub fn find_hardcoded_stream_config(
     stream_configs: &mut dyn Iterator<Item = SupportedStreamConfigRange>,
     sample_rate: usize,
     channels: usize,
@@ -54,4 +58,84 @@ pub fn find_suitable_stream_config(
     }
 
     return must_have_config;
+}
+
+pub fn select_audio_capture_device() -> cpal::Device {
+    let host = cpal::default_host();
+
+    let input_devices: Vec<_> = host.input_devices().unwrap().collect();
+
+    println!("Available input devices:");
+
+    for (i, device) in input_devices.iter().enumerate() {
+        println!("{}: {}", i, device.name().unwrap());
+    }
+
+    let input_device = select_device_menu("input", &input_devices);
+
+    println!(
+        "Selected input device: {}",
+        input_devices[input_device].name().unwrap()
+    );
+
+    input_devices[input_device].clone()
+}
+
+fn select_device_menu(kind: &str, devices: &[cpal::Device]) -> usize {
+    if devices.is_empty() {
+        panic!("No {} devices available!", kind);
+    }
+
+    loop {
+        print!("Select a {} device (0-{}): ", kind, devices.len() - 1);
+        let _ = io::stdout().flush();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+
+        match input.trim().parse::<usize>() {
+            Ok(i) if i < devices.len() => return i,
+            _ => {
+                println!("Invalid selection");
+                continue;
+            }
+        }
+    }
+}
+
+pub fn select_suitable_stream_config(
+    stream_configs: &mut dyn Iterator<Item = SupportedStreamConfigRange>,
+) -> cpal::StreamConfig {
+    let all_configs = stream_configs.collect::<Vec<_>>();
+
+    // Iterate over all the supported configs and print them and let the user select one.
+    for (i, config) in all_configs.iter().enumerate() {
+        println!("{}: {:?}", i, config);
+    }
+
+    println!("Select a config: ");
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+
+    let selected_config_index = input.trim().parse::<usize>().unwrap();
+
+    let selected_config = all_configs[selected_config_index].clone();
+
+    println!("Selected config: {:?}", selected_config);
+
+    // We just need the F32 pcm formats.
+
+    if selected_config.sample_format() == cpal::SampleFormat::F32 {
+        return cpal::StreamConfig {
+            // channels: constants::MIN_INPUT_DEVICE_CHANNELS as u16,
+            channels: selected_config.channels(),
+            sample_rate: selected_config.max_sample_rate(),
+            buffer_size: cpal::BufferSize::Fixed(
+                constants::MIN_INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES as u32,
+            ),
+        };
+    } else {
+        panic!("Selected config does not satisfy minimum requirements");
+    }
 }

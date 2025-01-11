@@ -22,3 +22,14 @@ pub const INPUT_DEVICE_BUFFER_SIZE_IN_BYTES: usize =
 
 pub const INPUT_DEVICE_BUFFER_SIZE_IN_PCM_SAMPLES: usize =
     INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES * INPUT_DEVICE_CHANNELS;
+
+// Better way to select input device sample rate. We just need a minimum sample rate.
+pub const MIN_INPUT_DEVICE_SAMPLE_RATE: usize = 16000;
+pub const EXACT_INPUT_DEVICE_CHANNELS: usize = 2;
+pub const MIN_INPUT_DEVICE_BUFFER_SIZE_MS: usize = 10;
+pub const MIN_INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES: usize =
+    (MIN_INPUT_DEVICE_SAMPLE_RATE / 1000) * MIN_INPUT_DEVICE_BUFFER_SIZE_MS;
+
+pub const MIN_INPUT_DEVICE_BUFFER_SIZE_IN_BYTES: usize = MIN_INPUT_DEVICE_BUFFER_SIZE_IN_SAMPLES
+    * EXACT_INPUT_DEVICE_CHANNELS
+    * size_of::<f32>() as usize;
